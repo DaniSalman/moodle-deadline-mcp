@@ -20,14 +20,16 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from agents import Agent, RunHooks, Runner, set_tracing_disabled
+from agents import Agent, ModelSettings, RunHooks, Runner, set_tracing_disabled
 from agents.exceptions import AgentsException
 from agents.mcp import MCPServer, MCPServerStdio, MCPServerStreamableHttp
 from agents.models import get_default_model
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from .config import DEFAULT_PORT, PROJECT_ROOT
 from .offline_model import OfflineKeywordModel
@@ -56,7 +58,8 @@ Calendar being written: {calendar}.
 How to use your tools:
 - A question about what is due -> get_upcoming_deadlines. Choose days_ahead from the question (today = 1, this week = 7, otherwise 14). Only report deadlines the tool returned; never invent one.
 - "Add / put / sync all my deadlines" -> sync_deadlines_to_calendar. One call does the whole job.
-- One specific deadline -> add_deadline_to_calendar. If it came from get_upcoming_deadlines, pass its title, due_at, course and uid (as moodle_uid).
+- One specific deadline -> add_deadline_to_calendar. If the student names a Moodle deadline, first get it with get_upcoming_deadlines (unless it is already in this conversation) and pass its exact title, due_at, course and uid (as moodle_uid), so it is never added twice.
+- A tool result with status "updated" means the event already existed and was changed (moved deadline or new reminder); say what changed.
 - Only write to the calendar when the student asks for it. If they only ask a question, just answer it.
 - If a tool returns an error, say in plain words what went wrong and what the student can do. Do not retry with made-up values.
 
@@ -71,6 +74,8 @@ def build_agent(server: MCPServer, model: Any, server_settings: dict[str, Any]) 
         instructions=make_instructions(server_settings),
         mcp_servers=[server],  # tools are discovered from the server with tools/list
         model=model,
+        # One tool call at a time: two parallel writes could race on the duplicate check.
+        model_settings=ModelSettings(parallel_tool_calls=False),
     )
 
 
@@ -86,12 +91,27 @@ def build_server(args: argparse.Namespace) -> MCPServer:
             },
             cache_tools_list=True,
             client_session_timeout_seconds=120,
+            failure_error_function=connection_failure,
         )
     return MCPServerStreamableHttp(
         name="moodle-deadlines (http)",
         params={"url": args.url, "timeout": 30},
         cache_tools_list=True,
         client_session_timeout_seconds=120,
+        failure_error_function=connection_failure,
+    )
+
+
+def connection_failure(context, error: Exception) -> str:
+    """Called when a tool call fails in the MCP layer instead of returning a result (e.g. the server stopped)."""
+    detail = f"{type(error).__name__}: {str(error)[:200]}"
+    console.print(
+        f"[red]The MCP call failed ({escape(detail)}).[/] "
+        "If the server stopped, restart it with: python -m deadline_mcp.server"
+    )
+    return (
+        f"The tool call failed before the tool could answer ({detail}). The MCP server may have stopped; "
+        "tell the student to check it and restart it with `python -m deadline_mcp.server` if needed."
     )
 
 
@@ -117,7 +137,9 @@ class RoundTripPrinter(RunHooks):
         for item in response.output:
             kind = getattr(item, "type", "")
             if kind == "function_call":
-                console.print(f"[magenta]  model asked for a tool call:[/] [bold]{item.name}[/]({item.arguments})")
+                console.print(
+                    f"[magenta]  model asked for a tool call:[/] [bold]{escape(item.name)}[/]({escape(item.arguments)})"
+                )
             elif kind == "message":
                 console.print("[magenta]  model wrote the final answer[/]")
             elif kind == "reasoning":
@@ -128,7 +150,7 @@ class RoundTripPrinter(RunHooks):
 
     async def on_tool_start(self, context, agent, tool) -> None:
         arguments = getattr(context, "tool_arguments", "") or ""
-        console.print(f"[cyan]> MCP client -> server:[/] tools/call [bold]{tool.name}[/] {arguments}")
+        console.print(f"[cyan]> MCP client -> server:[/] tools/call [bold]{escape(tool.name)}[/] {escape(arguments)}")
 
     async def on_tool_end(self, context, agent, tool, result) -> None:
         console.print(f"[green]< server -> MCP client:[/] {_preview(result)}")
@@ -149,16 +171,16 @@ def _preview(result: Any) -> str:
     try:
         data = json.loads(text)
     except ValueError:
-        return f"[red]tool error:[/] {text}"
+        return f"[red]tool error:[/] {escape(text)}"
     if isinstance(data, dict) and "deadlines" in data:
-        names = ", ".join(d["title"] for d in data["deadlines"][:4])
+        names = escape(", ".join(d["title"] for d in data["deadlines"][:4]))
         more = "..." if data["count"] > 4 else ""
         return f"DeadlineList with {data['count']} deadline(s) [dim]({names}{more})[/]"
     if isinstance(data, dict) and "checked" in data:
-        return f"SyncReport: {data['message']}"
+        return f"SyncReport: {escape(data['message'])}"
     if isinstance(data, dict) and "status" in data:
-        return f"CalendarAddResult: {data['status']} - {data['summary']}"
-    return text[:200]
+        return f"CalendarAddResult: {data['status']} - {escape(data['summary'])}"
+    return escape(text[:200])
 
 
 # --------------------------------------------------------------------------- chat loop
@@ -169,10 +191,10 @@ async def run_turn(agent: Agent, history: list[Any], text: str, printer: RoundTr
     try:
         result = await Runner.run(agent, history + [{"role": "user", "content": text}], hooks=printer, max_turns=8)
     except AgentsException as exc:
-        console.print(f"[red]The agent stopped: {exc}[/]")
+        console.print(f"[red]The agent stopped:[/] {escape(str(exc))}")
         return
     except Exception as exc:  # network / API errors from the model provider
-        console.print(f"[red]Model request failed ({type(exc).__name__}): {exc}[/]")
+        console.print(f"[red]Model request failed ({type(exc).__name__}):[/] {escape(str(exc))}")
         return
     history[:] = result.to_input_list()
     console.print(Panel(Markdown(str(result.final_output)), title="assistant", border_style="green"))
@@ -193,14 +215,19 @@ def show_tools(tools: list[Any]) -> None:
         meta = getattr(tool, "meta", None) or {}
         annotations = getattr(tool, "annotations", None)
         read_only = getattr(annotations, "read_only_hint", None) if annotations else None
-        table.add_row(tool.name, str(meta.get("category", "?")), "yes" if read_only else "no", (tool.description or "").split("\n")[0])
+        table.add_row(
+            Text(tool.name),
+            Text(str(meta.get("category", "?"))),
+            "yes" if read_only else "no",
+            Text((tool.description or "").split("\n")[0]),
+        )
     console.print(table)
 
 
 def show_schemas(tools: list[Any]) -> None:
     for tool in tools:
         schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", {})
-        console.print(Panel(json.dumps(schema, indent=2), title=f"{tool.name} input schema", border_style="cyan"))
+        console.print(Panel(Text(json.dumps(schema, indent=2)), title=escape(f"{tool.name} input schema"), border_style="cyan"))
 
 
 def show_context(history: list[Any]) -> None:
@@ -219,7 +246,7 @@ def show_context(history: list[Any]) -> None:
             body = _text_of(item.get("output"))
         else:
             body = ""
-        table.add_row(str(index), kind, (body[:110] + "...") if len(body) > 110 else body)
+        table.add_row(str(index), Text(kind), Text((body[:110] + "...") if len(body) > 110 else body))
     console.print(table)
 
 
@@ -242,7 +269,7 @@ async def chat(args: argparse.Namespace) -> int:
     try:
         await server.connect()
     except Exception as exc:
-        console.print(f"[red]Could not connect to the MCP server at {where} ({type(exc).__name__}).[/]")
+        console.print(f"[red]Could not connect to the MCP server at {escape(where)} ({type(exc).__name__}).[/]")
         if not args.stdio:
             console.print("Start it first in another terminal:  python -m deadline_mcp.server   (or use --stdio)")
         return 1
@@ -266,7 +293,7 @@ async def chat(args: argparse.Namespace) -> int:
 
         history: list[Any] = []
         if args.ask:
-            console.print(f"[bold]you >[/] {args.ask}")
+            console.print(f"[bold]you >[/] {escape(args.ask)}")
             await run_turn(agent, history, args.ask, printer)
             return 0
 
@@ -293,7 +320,10 @@ async def chat(args: argparse.Namespace) -> int:
                 await run_turn(agent, history, text, printer)
         return 0
     finally:
-        await server.cleanup()
+        try:
+            await server.cleanup()
+        except Exception:
+            console.print("[dim]The connection to the MCP server was already closed.[/]")
 
 
 def main() -> None:

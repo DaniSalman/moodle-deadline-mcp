@@ -29,6 +29,9 @@ HELP_TEXT = (
 _COURSE = re.compile(r"\b([A-Za-z]{3,4})\s?(\d{3}[A-Za-z]?)\b")
 _ISO = re.compile(r"\b(\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?)\b")
 _HOURS = re.compile(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b")
+_DAYS_BEFORE = re.compile(r"\b(\d+|a|one|two|three)\s*days?\s+before\b")
+_NUMBERS = {"a": 1, "one": 1, "two": 2, "three": 3, "four": 4}
+_NOT_COURSES = {"next", "last", "past", "over", "with", "from", "into", "only", "due", "for", "the"}
 _STOP = {"the", "my", "to", "add", "put", "in", "on", "for", "and", "is", "due", "calendar", "remind", "me", "before", "hours", "hour"}
 
 
@@ -64,16 +67,16 @@ class OfflineKeywordModel(Model):
 def _choose_tool(text: str, items: list[Any]) -> tuple[str, dict[str, Any]] | None:
     lowered = text.lower()
     args: dict[str, Any] = {}
-    course = _COURSE.search(text)
-    hours = _HOURS.search(lowered)
+    course = _course(text)
+    hours = _hours(lowered)
 
     wants_write = re.search(r"\b(add|put|sync|remind|schedule)\b", lowered)
     if wants_write and ("sync" in lowered or re.search(r"\b(all|every|everything)\b", lowered)):
         args["days_ahead"] = _days(lowered)
-        if hours:
-            args["remind_hours_before"] = float(hours.group(1))
+        if hours is not None:
+            args["remind_hours_before"] = hours
         if course:
-            args["course"] = course.group(1).upper() + course.group(2).upper()
+            args["course"] = course
         return "sync_deadlines_to_calendar", args
 
     if wants_write:
@@ -85,19 +88,39 @@ def _choose_tool(text: str, items: list[Any]) -> tuple[str, dict[str, Any]] | No
             args = {"title": title.strip(" ,.") or "Deadline", "due_at": _ISO.search(text).group(1).replace(" ", "T")}
         else:
             return None
-        if hours:
-            args["remind_hours_before"] = float(hours.group(1))
+        if hours is not None:
+            args["remind_hours_before"] = hours
         return "add_deadline_to_calendar", args
 
     args["days_ahead"] = _days(lowered)
     if course:
-        args["course"] = course.group(1).upper() + course.group(2).upper()
+        args["course"] = course
     return "get_upcoming_deadlines", args
 
 
+def _course(text: str) -> str | None:
+    for match in _COURSE.finditer(text):
+        if match.group(1).lower() not in _NOT_COURSES:
+            return (match.group(1) + match.group(2)).upper()
+    return None
+
+
+def _hours(text: str) -> float | None:
+    if match := _HOURS.search(text):
+        return float(match.group(1))
+    if match := _DAYS_BEFORE.search(text):
+        word = match.group(1)
+        return 24.0 * (int(word) if word.isdigit() else _NUMBERS[word])
+    return None
+
+
 def _days(text: str) -> int:
+    text = _DAYS_BEFORE.sub("", text)  # "remind me 1 day before" is not a window
     if match := re.search(r"(\d+)\s*days?", text):
         return max(1, min(60, int(match.group(1))))
+    if match := re.search(r"\b(\d+|a|one|two|three|four)\s*weeks?", text):
+        word = match.group(1)
+        return min(60, 7 * (int(word) if word.isdigit() else _NUMBERS[word]))
     if "today" in text or "tonight" in text:
         return 1
     if "tomorrow" in text:

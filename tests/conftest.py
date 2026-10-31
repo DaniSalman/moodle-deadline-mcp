@@ -57,19 +57,37 @@ class FakeGoogleService:
     def __init__(self, fail_with: Exception | None = None):
         self.events_store: list[dict[str, Any]] = []
         self.inserted_bodies: list[dict[str, Any]] = []
+        self.patched_bodies: list[dict[str, Any]] = []
+        self.list_calls: list[list[str]] = []
         self.fail_with = fail_with
 
     def events(self):
         return self
 
     def list(self, calendarId, privateExtendedProperty, **kwargs):
-        key, value = privateExtendedProperty.split("=", 1)
+        # Like the real API: every "key=value" constraint must match.
+        constraints = [c.split("=", 1) for c in privateExtendedProperty]
+        self.list_calls.append(privateExtendedProperty)
 
         def run():
             if self.fail_with:
                 raise self.fail_with
-            matches = [e for e in self.events_store if e["extendedProperties"]["private"].get(key) == value]
+            matches = [
+                e for e in self.events_store
+                if all(e["extendedProperties"]["private"].get(k) == v for k, v in constraints)
+            ]
             return {"items": matches[:1]}
+
+        return FakeRequest(run)
+
+    def patch(self, calendarId, eventId, body):
+        def run():
+            if self.fail_with:
+                raise self.fail_with
+            event = next(e for e in self.events_store if e["id"] == eventId)
+            event.update(body)
+            self.patched_bodies.append(body)
+            return event
 
         return FakeRequest(run)
 

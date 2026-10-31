@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
+from urllib.request import url2pathname
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -83,10 +85,38 @@ def load_settings() -> Settings:
     )
 
 
+_SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*)://")
+
+
+def feed_location(source: str) -> tuple[str, str]:
+    """Classify MOODLE_ICAL_URL as ("url", https link), ("file", path) or ("unsupported", scheme).
+
+    Anything with a scheme is treated as a link, never as a file name, so the
+    token in its query string cannot end up in a "file not found" message.
+    """
+    match = _SCHEME.match(source)
+    if not match:
+        return "file", source
+    scheme = match.group(1).lower()
+    if scheme in ("http", "https"):
+        return "url", source
+    if scheme in ("webcal", "webcals"):  # calendar apps' name for the same https link
+        return "url", "https://" + source[match.end():]
+    if scheme == "file":
+        return "file", url2pathname(urlsplit(source).path)
+    return "unsupported", scheme
+
+
 def describe_source(url_or_path: str) -> str:
     """Name the feed without leaking its secret token (host or file name only)."""
     if not url_or_path:
         return "(not configured)"
-    if url_or_path.lower().startswith(("http://", "https://")):
-        return urlsplit(url_or_path).hostname or "(unknown host)"
-    return f"file:{Path(url_or_path).name}"
+    kind, value = feed_location(url_or_path)
+    if kind == "url":
+        try:
+            return urlsplit(value).hostname or "(unknown host)"
+        except ValueError:
+            return "(invalid link)"
+    if kind == "unsupported":
+        return f"(unsupported {value}:// link)"
+    return "file:" + Path(value).name.split("?")[0]

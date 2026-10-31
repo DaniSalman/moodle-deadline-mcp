@@ -27,10 +27,14 @@ class DeadlineList(BaseModel):
     count: int
     deadlines: list[Deadline]
     ignored_events: int = Field(description="Events in the window that are not deadlines (e.g. 'Quiz opens', lectures).")
+    unreadable_events: int = Field(0, description="Events in the feed that could not be read (bad dates); skipped.")
 
 
 class CalendarAddResult(BaseModel):
-    status: Literal["created", "already_exists"]
+    status: Literal["created", "updated", "already_exists"] = Field(
+        description="created = new event; updated = it existed but Moodle moved the deadline or a new reminder was "
+        "asked for, so the same event was changed; already_exists = nothing needed to change."
+    )
     event_id: str
     event_link: str | None = Field(description="Link to open the event in Google Calendar (None for the local backend).")
     calendar: str = Field(description="Which calendar was written, e.g. 'google:primary'.")
@@ -50,6 +54,7 @@ class SyncFailure(BaseModel):
 class SyncReport(BaseModel):
     checked: int = Field(description="Deadlines found in Moodle for the window.")
     created: list[CalendarAddResult]
+    updated: list[CalendarAddResult] = Field(description="Events that existed but were moved because Moodle changed the deadline.")
     already_in_calendar: list[CalendarAddResult]
     failed: list[SyncFailure]
     message: str

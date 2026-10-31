@@ -18,6 +18,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from pydantic import Field
 from rich.console import Console
+from rich.markup import escape
 
 from . import __version__, core
 from .calendars import open_calendar
@@ -44,23 +45,23 @@ class RoundTripLogger(Middleware):
         return tools
 
     async def on_read_resource(self, context: MiddlewareContext, call_next):
-        log.print(f"[cyan]<- resources/read[/] {context.message.uri}")
+        log.print(f"[cyan]<- resources/read[/] {escape(str(context.message.uri))}")
         return await call_next(context)
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         name = context.message.name
         args = json.dumps(context.message.arguments or {}, ensure_ascii=False)
         category = TOOL_CATEGORIES.get(name, "?")
-        log.print(f"[bold cyan]<- tools/call[/] [bold]{name}[/] [dim]({category})[/] {args}")
+        log.print(f"[bold cyan]<- tools/call[/] [bold]{escape(name)}[/] [dim]({category})[/] {escape(args)}")
         started = time.perf_counter()
         try:
             result = await call_next(context)
         except Exception as exc:
             elapsed = time.perf_counter() - started
-            log.print(f"[bold red]-> error[/] after {elapsed:.2f}s: {exc}")
+            log.print(f"[bold red]-> error[/] after {elapsed:.2f}s: {escape(str(exc))}")
             raise
         elapsed = time.perf_counter() - started
-        log.print(f"[bold green]-> result[/] after {elapsed:.2f}s: {_describe(result.structured_content)}")
+        log.print(f"[bold green]-> result[/] after {elapsed:.2f}s: {escape(_describe(result.structured_content))}")
         return result
 
 
@@ -151,29 +152,39 @@ def get_upcoming_deadlines(days_ahead: DaysAhead = 14, course: CourseFilter = No
     tags={"action"},
 )
 def add_deadline_to_calendar(
-    title: Annotated[str, Field(min_length=1, description="What is due, e.g. 'C5 - Agent Tools is due'.")],
+    title: Annotated[str, Field(min_length=1, max_length=300, description="What is due, e.g. 'C5 - Agent Tools is due'.")],
     due_at: Annotated[
         str,
-        Field(description="When it is due, ISO 8601, e.g. '2026-11-05T23:59' (student's time zone) or with an offset."),
+        Field(
+            max_length=40,
+            description="When it is due, ISO 8601, e.g. '2026-11-05T23:59' (student's time zone) or with an offset. "
+            "A date alone means 23:59 that day.",
+        ),
     ],
     remind_hours_before: RemindHours = None,
-    course: Annotated[str | None, Field(description="Course short name to show in the event title, e.g. 'EECE503P'.")] = None,
+    course: Annotated[
+        str | None, Field(max_length=60, description="Course short name to show in the event title, e.g. 'EECE503P'.")
+    ] = None,
     moodle_uid: Annotated[
         str | None,
-        Field(description="The deadline's `uid` from get_upcoming_deadlines, if it came from Moodle. Prevents duplicates."),
+        Field(
+            max_length=200,
+            description="The deadline's `uid` from get_upcoming_deadlines, if it came from Moodle. Prevents duplicates.",
+        ),
     ] = None,
 ) -> CalendarAddResult:
     """Create ONE Google Calendar event at a deadline, with a phone notification X hours before it.
 
     The event starts at the deadline (15 minutes long) and has a popup reminder `remind_hours_before`
-    hours earlier. Safe to repeat: if the same deadline is already in the calendar, nothing new is created
-    and status is 'already_exists'. Refuses deadlines that have already passed.
+    hours earlier. Safe to repeat: if this deadline is already in the calendar, no second event is created
+    (status 'already_exists'); if its time moved in Moodle or a different reminder is asked for, that same
+    event is changed (status 'updated'). Refuses deadlines that have already passed.
     """
     settings = _run(load_settings)
+    # Validate first, so a bad request is reported as such even before signing in to Google.
+    deadline = _run(core.prepare_deadline, settings, title, due_at, remind_hours_before, course, moodle_uid)
     calendar = _run(open_calendar, settings)
-    return _run(
-        core.add_deadline_to_calendar, settings, calendar, title, due_at, remind_hours_before, course, moodle_uid
-    )
+    return _run(core.write_deadline, settings, calendar, deadline)
 
 
 @mcp.tool(
@@ -195,8 +206,9 @@ def sync_deadlines_to_calendar(
     """Copy every upcoming Moodle deadline into Google Calendar in one step, each with a reminder.
 
     Runs get_upcoming_deadlines once, then add_deadline_to_calendar for each deadline found. Deadlines
-    already in the calendar are skipped, and if one deadline fails the rest still go through; the report
-    lists what was created, what already existed and what failed (with the reason).
+    already in the calendar are skipped, ones Moodle moved are updated, and if one deadline fails the rest
+    still go through; the report lists what was created, updated, already there, and failed (with the reason).
+    Without remind_hours_before, existing events keep their reminder and new ones get the default.
     """
     settings = _run(load_settings)
     return _run(

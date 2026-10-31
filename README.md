@@ -13,8 +13,8 @@ agent built with the **OpenAI Agents SDK**:
 | Category | Tool | What it does |
 |---|---|---|
 | **Data** | `get_upcoming_deadlines` | Reads your Moodle calendar export and returns the deadlines due in the next N days. Read-only. |
-| **Action** | `add_deadline_to_calendar` | Creates **one** Google Calendar event at a deadline with a popup reminder X hours before. Never duplicates. |
-| **Orchestration** | `sync_deadlines_to_calendar` | Runs the Data step once, then the Action step for every deadline found, and reports what was added, skipped or failed. |
+| **Action** | `add_deadline_to_calendar` | Creates **one** Google Calendar event at a deadline with a popup reminder X hours before. Never duplicates. If Moodle moves the deadline, it moves the same event. |
+| **Orchestration** | `sync_deadlines_to_calendar` | Runs the Data step once, then the Action step for every deadline found, and reports what was added, updated, skipped or failed. |
 
 There is also one read-only resource, `deadline-assistant://settings` (time
 zone, default reminder, which calendar), which the client reads when it starts.
@@ -60,7 +60,7 @@ scripts/
   google_auth.py      one-time Google sign-in (creates token.json)
   try_tools.py        call each tool directly over MCP, failure cases included
   make_sample_feed.py write samples/moodle_sample.ics for offline rehearsal
-tests/              62 tests, all offline (no OpenAI, Moodle or Google calls)
+tests/              95 tests, all offline (no OpenAI, Moodle or Google calls)
 ```
 
 ## Setup
@@ -167,7 +167,7 @@ server, tools. Events go to `data/local_calendar.json` instead of Google.
 python -m pytest
 ```
 
-There are 62 tests, and none of them call OpenAI, Moodle or Google. They are
+There are 95 tests, and none of them call OpenAI, Moodle or Google. They are
 named after the requirement IDs in [docs/requirements.md](docs/requirements.md):
 
 - `test_data_tool.py` (D1–D8): parsing a Moodle-format export, the time
@@ -189,6 +189,11 @@ named after the requirement IDs in [docs/requirements.md](docs/requirements.md):
 - `test_agent_roundtrip.py`: the Agents SDK agent talks to the server as a
   stdio subprocess. It covers a question, then list → add one → sync all, and
   a tool error reaching the model as text.
+- `test_qa_regressions.py`: one or more tests for each issue the QA review
+  found. These cover a token leak through `webcal://` links, a moved deadline
+  left stale, duplicates after adding by hand, terminal markup injection,
+  checking input before Google sign-in, date-only input, DST, unreadable
+  events, and the server stopping mid-session.
 
 To call the tools by hand without an LLM (the failure cases included):
 
@@ -203,13 +208,19 @@ python scripts/try_tools.py --write    # also the Action and Orchestration tools
   notification is a property of the calendar event (a popup reminder), so
   Google sends it and the Action tool still does one thing.
 - **Idempotent writes.** Every event stores a private `dedupKey` (the Moodle
-  event UID). Re-running a sync never duplicates events, which makes the
-  Orchestration tool safe to call again.
+  event UID) plus the due time and a normalised title. Re-running a sync never
+  duplicates events, even when a deadline was first added by hand. When Moodle
+  moves a deadline, the same event is moved (`status: updated`), so the
+  reminder follows the new date.
 - **Partial failure is reported, never hidden.** The sync returns
   `created`, `already_in_calendar` and `failed` (with reasons).
 - **The loop lives in the server.** One `sync_deadlines_to_calendar` call
   replaces 1 + N model-driven tool calls: fewer tokens, fixed order, one report.
-- **Secrets stay out.** Only the host name of the Moodle URL is ever shown, and
+- **Validate before acting.** Every argument is checked before Google is
+  even opened. A date without a time means 23:59, the same rule the Moodle
+  parser uses.
+- **Secrets stay out.** Only the host name of the Moodle URL is ever shown,
+  whatever the link's scheme (`webcal://` links are fetched as `https://`).
   `.env`, `credentials.json` and `token.json` are git-ignored.
 
 ## Troubleshooting
@@ -220,4 +231,5 @@ python scripts/try_tools.py --write    # also the Action and Orchestration tools
 | `Moodle did not return calendar data ... Invalid authentication` | The export link expired. Make a new one in Moodle and update `.env`. |
 | `Not signed in to Google Calendar yet` | `python scripts/google_auth.py` |
 | `Could not connect to the MCP server` | Start `python -m deadline_mcp.server` first, or use `--stdio`. |
+| `The MCP call failed ... the server may have stopped` | The server terminal was closed mid-chat; start it again. |
 | `OPENAI_API_KEY is not set` | Add it to `.env`, or try `--offline`. |

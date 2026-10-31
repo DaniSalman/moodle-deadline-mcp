@@ -73,7 +73,7 @@ async def test_list_then_add_one_then_sync_all(env):
     # The model reused the uid from the earlier Data result, so the sync saw it as a duplicate.
     assert calls[1][1]["moodle_uid"].endswith("@lms.aub.edu.lb")
     assert calls[1][1]["remind_hours_before"] == 6
-    assert "4 added, 1 already in the calendar" in answers[2]
+    assert "4 added, 0 updated, 1 already in the calendar" in answers[2]
     stored = json.loads(env["calendar"].read_text())
     assert len(stored) == 5
 

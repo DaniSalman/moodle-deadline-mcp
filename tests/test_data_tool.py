@@ -18,7 +18,8 @@ BEIRUT = ZoneInfo("Asia/Beirut")
 
 
 def test_d1_parses_moodle_export(feed_text):
-    events = parse_events(feed_text, BEIRUT)
+    events, unreadable = parse_events(feed_text, BEIRUT)
+    assert unreadable == 0
     assert len(events) == 10
     c5 = next(e for e in events if e.summary == "C5 - Agent Tools is due")
     assert c5.uid.endswith("@lms.aub.edu.lb")
@@ -141,7 +142,7 @@ def test_html_entities_and_date_only_events():
         "BEGIN:VEVENT\r\nUID:2@x\r\nSUMMARY:Floating time is due\r\nDTSTART:20261106T120000\r\nEND:VEVENT\r\n"
         "END:VCALENDAR\r\n"
     )
-    first, second = parse_events(text, BEIRUT)
+    (first, second), _ = parse_events(text, BEIRUT)
     assert first.summary == "Essay & outline is due"
     assert first.course == "ENGL&206"
     assert first.start.strftime("%H:%M") == "23:59" and first.start.tzinfo is not None

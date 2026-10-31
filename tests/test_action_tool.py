@@ -63,7 +63,7 @@ def test_a2_same_deadline_twice_creates_one_event(settings, env, backend):
     second = add_deadline_to_calendar(settings, calendar, "Lab 6 report is due", "2026-11-05T17:00", 24, "EECE437", "48006@x", now=NOW)
     assert (first.status, second.status) == ("created", "already_exists")
     assert first.event_id == second.event_id
-    assert "nothing new was added" in second.message
+    assert "nothing was changed" in second.message
 
 
 def test_a2_manual_entries_are_deduplicated_too(settings, env):

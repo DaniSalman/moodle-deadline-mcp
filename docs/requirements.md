@@ -51,8 +51,9 @@ the orchestration tool can call the same functions the other two tools use.
 | Google Calendar | Calendar API v3 with OAuth (desktop app flow), scope `calendar.events` only | Least privilege: the server can manage events but cannot change calendar settings or sharing. |
 | Notification | The created event's own reminder (`popup`, X hours before) | Google delivers the push to the phone. No background process has to stay alive, and the Action tool keeps a single effect. |
 
-`MOODLE_ICAL_URL` may also be a path to a local `.ics` file. Tests and the
-offline rehearsal use this with a generated sample feed.
+`MOODLE_ICAL_URL` may also be a path to a local `.ics` file (or a `file://`
+link). Tests and the offline rehearsal use this with a generated sample feed.
+A `webcal://` link is fetched as `https://`; any other scheme is refused.
 
 ## 5. The three tools
 
@@ -64,11 +65,13 @@ Looks up upcoming Moodle deadlines. Never changes anything.
   (case-insensitive match on the course short name).
 - Output (`DeadlineList`): `source` (host only), `timezone`, `window_start`,
   `window_end`, `count`, `deadlines[]` (each: `uid`, `course`, `title`,
-  `activity`, `kind`, `due_at`, `due_in_hours`), `ignored_events`.
+  `activity`, `kind`, `due_at`, `due_in_hours`), `ignored_events`,
+  `unreadable_events`.
 - What counts as a deadline: event titles Moodle generates for closing dates,
   so "... is due", "... closes", "... deadline" and "... should be completed".
   "... opens" events, lectures and other timed events are counted in
-  `ignored_events` and left out.
+  `ignored_events` and left out. "... closes" only counts inside a course
+  (a site event like "Library closes" is not a deadline).
 - Sorted by due time, soonest first. Times are shown in `TIMEZONE`
   (default Asia/Beirut).
 - [D1] Parses a real Moodle-format feed into deadlines with course and due time.
@@ -81,25 +84,42 @@ Looks up upcoming Moodle deadlines. Never changes anything.
   example "Invalid authentication" from an expired token) → clear error telling
   the user to generate a new export URL.
 - [D7] `days_ahead` outside 1 to 60 is rejected by the input schema.
-- [D8] The secret export token never appears in any output, error or log line.
+- [D8] The secret export token never appears in any output, error or log line,
+  whatever the link's scheme.
+- [D9] One unreadable event (for example a broken date) is skipped and counted
+  in `unreadable_events`; the rest of the feed is still used.
+- Durations (`due_in_hours`) are computed in UTC, so they stay right across
+  daylight-saving changes.
 
 ### 5.2 Action tool: `add_deadline_to_calendar`
 
 Creates one Google Calendar event for one deadline, with a reminder.
 
-- Input: `title: str`, `due_at: str` (ISO 8601; no offset means `TIMEZONE`),
-  `remind_hours_before: float` (0 to 672, default from `.env`, 24),
-  `course: str | None`, `moodle_uid: str | None`.
-- Output (`CalendarAddResult`): `status` (`created` or `already_exists`),
+- Input: `title: str`, `due_at: str` (ISO 8601; no offset means `TIMEZONE`;
+  a date alone means 23:59 that day), `remind_hours_before: float | None`
+  (0 to 672; empty means the default from `.env` for a new event and "keep
+  the current reminder" for an existing one), `course: str | None`,
+  `moodle_uid: str | None`.
+- Output (`CalendarAddResult`): `status` (`created`, `updated` or
+  `already_exists`),
   `event_id`, `event_link`, `calendar`, `summary`, `due_at`, `reminder_at`,
   `reminder_already_passed`, `message`.
 - Event shape: starts at the deadline and lasts 15 minutes, so a reminder
   "X hours before the start" is exactly X hours before the deadline. Title
   `[COURSE] title`. Popup reminder only.
-- Idempotent: every event carries a private extended property `dedupKey`
-  (the Moodle UID, or a hash of title + due time for manual entries). If an
-  event with that key exists, nothing new is created and the existing event
-  is returned with `status = already_exists`.
+- Idempotent: every event carries private extended properties: `dedupKey`
+  (the Moodle UID, or a hash of title + due time for manual entries), `dueAt`,
+  `titleKey` and `origin`. The tool never creates a second event for the same
+  deadline. It looks the event up by `dedupKey`, then by `dueAt` + `titleKey`,
+  so a deadline added by hand is matched by a later Moodle sync. A Moodle
+  deadline only matches hand-made events this way, so two different Moodle
+  events with the same title and time stay separate.
+- The tool's job is "this deadline is in the calendar with this reminder".
+  If the event exists unchanged, the status is `already_exists`. If Moodle
+  moved the deadline, or a different reminder was asked for, the same event
+  is changed and the status is `updated`, with a message saying what changed.
+- Arguments are fully validated before the calendar is opened, so a bad
+  request is reported as such even when Google sign-in is missing.
 - [A1] Creates an event with the right start, end, title and reminder minutes.
 - [A2] Calling it twice with the same deadline creates one event, not two.
 - [A3] Failure: `due_at` that is not ISO 8601 → clear error with an example.
@@ -110,6 +130,12 @@ Creates one Google Calendar event for one deadline, with a reminder.
   flagged (`reminder_already_passed = true`) so the agent can say so.
 - [A7] `remind_hours_before` outside 0 to 672 (Google's 4-week limit) is
   rejected by the input schema.
+- [A8] A deadline Moodle moved updates the existing event (`updated`), and
+  the reminder the student chose earlier is kept.
+- [A9] Asking again with a different reminder updates it; asking again with
+  no reminder changes nothing.
+- [A10] Adding a deadline by hand and then syncing it from Moodle (or the
+  other way round) leaves one event.
 
 ### 5.3 Orchestration tool: `sync_deadlines_to_calendar`
 
@@ -118,8 +144,8 @@ running the Data step once and the Action step once per deadline.
 
 - Input: `days_ahead` (1 to 60, default 14), `remind_hours_before`
   (0 to 672, default from `.env`), `course: str | None`.
-- Output (`SyncReport`): `checked`, `created[]`, `already_in_calendar[]`,
-  `failed[]` (title + reason), `message`.
+- Output (`SyncReport`): `checked`, `created[]`, `updated[]`,
+  `already_in_calendar[]`, `failed[]` (title + reason), `message`.
 - [O1] Creates events for all deadlines in the window and reports them.
 - [O2] Running it twice creates nothing the second time (all
   `already_in_calendar`).
@@ -166,6 +192,12 @@ reminder default into the agent's instructions.
   stdio with `--stdio`.
 - [H2] Works end to end without an OpenAI key using `--offline` (a keyword-based
   stand-in model), so the round trip can be tested and rehearsed for free.
+- [H3] If the server stops mid-session, the model is told the call failed and
+  the terminal says how to restart the server. No crash.
+- One tool call at a time (`parallel_tool_calls=False`), so two writes cannot
+  race on the duplicate check.
+- Text from tools, Moodle or the user is printed literally (no terminal markup
+  injection).
 
 ## 8. Non-functional
 
@@ -174,3 +206,13 @@ reminder default into the agent's instructions.
   `token.json`) live only in `.env` and git-ignored files.
 - The test suite runs offline: no OpenAI, Moodle or Google calls.
 - Server logs go to stderr (stdout is the protocol channel under stdio).
+
+## 9. QA review
+
+After the first version, a separate QA agent reviewed and attacked the code.
+It found 14 issues. Two were high severity: the token could leak through a
+`webcal://` link, and a deadline moved in Moodle stayed stale in the calendar.
+The others included duplicates from adding by hand and then syncing, terminal
+markup injection, validation running only after Google sign-in, date-only
+input landing at 00:00, DST arithmetic and unreadable events. They are fixed
+above, and each has a regression test in `tests/test_qa_regressions.py`.
