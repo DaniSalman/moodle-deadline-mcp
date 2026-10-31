@@ -1,0 +1,15 @@
+# Versions tested on Windows 11, Python 3.14 (October 2026).
+fastmcp==4.1.4
+openai-agents==0.24.0
+icalendar==7.3.0
+httpx==0.28.1
+google-api-python-client==2.201.0
+google-auth==2.62.0
+google-auth-oauthlib==1.5.0
+python-dotenv==1.2.4
+rich==15.0.0
+tzdata==2026.6
+
+# tests
+pytest==9.2.0
+pytest-asyncio==1.4.1

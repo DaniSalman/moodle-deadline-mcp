@@ -1,0 +1,15 @@
+# secrets
+.env
+credentials.json
+token.json
+client_secret*.json
+
+# local data
+data/
+samples/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
