@@ -19,7 +19,7 @@ agent built with the **OpenAI Agents SDK**:
 There is also one read-only resource, `deadline-assistant://settings` (time
 zone, default reminder, which calendar), which the client reads when it starts.
 
-- **Demo video:** _add the link here after recording_
+- **Demo video:** https://drive.google.com/file/d/1MQuAL1DMIutwBoQHDjSrSNvaEynWn6zI/view?usp=sharing
 - **Written summary (Part 1):** [docs/summary.md](docs/summary.md)
 - **Reflection:** [docs/reflection.md](docs/reflection.md)
 - **Requirements and design (written before the code):** [docs/requirements.md](docs/requirements.md)
